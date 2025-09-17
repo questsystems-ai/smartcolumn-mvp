@@ -1,0 +1,28 @@
+# --- Python / Streamlit ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.pytest_cache/
+.ipynb_checkpoints/
+.streamlit/                 # local config; DO NOT commit secrets here
+!.streamlit/config.toml     # (optional) allow non-secret config
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+
+# --- Local secrets (very important) ---
+.env
+.env.*
+*.env
+secrets.*.toml
+.streamlit/secrets.toml
+
+# --- Logs / caches ---
+*.log
+.cache/

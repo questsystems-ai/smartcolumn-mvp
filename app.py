@@ -14,6 +14,14 @@ from pathlib import Path
 from planner.planner import plan_column, PlannerConfig
 from post_run import render_post_run, get_sb
 
+from db_supabase import get_sb
+sb = None
+try:
+    sb = get_sb()
+except Exception as e:
+    sb = None
+    st.sidebar.warning(f"Supabase not configured: {e}")
+
 # ----------------- Supabase init (no UI here) -----------------
 sb = None
 _sb_err = None
