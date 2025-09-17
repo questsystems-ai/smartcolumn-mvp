@@ -1,130 +1,285 @@
 # app.py
+from __future__ import annotations
+
+# ---- MUST be the first Streamlit call ----
 import streamlit as st
+st.set_page_config(page_title="SmartColumn", page_icon="🧪", layout="wide")
+
+# ---- Imports (no UI at import-time) ----
+from dataclasses import asdict
 import pandas as pd
+import streamlit.components.v1 as components
+from pathlib import Path
 
 from planner.planner import plan_column, PlannerConfig
+from post_run import render_post_run, get_sb
 
-# ---- economics (placeholders) ----
-PRICE_PER_24L_USD  = 120.00    # solvent case
-DISPOSAL_PER_L_USD = 6.00      # non-halogenated
-SILICA_COST_PER_KG = 100.00    # loose silica
+# ----------------- Supabase init (no UI here) -----------------
+sb = None
+_sb_err = None
+try:
+    sb = get_sb()
+except Exception as e:
+    _sb_err = str(e)
 
-# Standard glass IDs we’ll try
-STANDARD_GLASS_IDS_CM = [0,8, 10, 13, 15, 20, 25, 30, 40, 50]  # in mm for readability? We'll keep cm integers.
-# Use cm values:
-STANDARD_GLASS_IDS_CM = [0.8, 1.0, 1.3, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0]
+# ----------------- Router (session-state only) -----------------
+if "route" not in st.session_state:
+    st.session_state["route"] = "plan"
 
-# Biotage-style cartridges (placeholder)
-BIOTAGE_CARTS = [
-    (10,  "Sfär 10 g",   35),
-    (25,  "Sfär 25 g",   49),
-    (50,  "Sfär 50 g",   69),
-    (100, "Sfär 100 g",  99),
-    (185, "Sfär 185 g", 149),
-    (340, "Sfär 340 g", 199),
-    (500, "Sfär 500 g", 259),
+def goto(route: str, **stash):
+    # Stash any context, set route, and rerun
+    for k, v in stash.items():
+        st.session_state[k] = v
+    st.session_state["route"] = route
+    st.rerun()
+
+# ----------------- Shared constants & helpers -----------------
+STANDARD_GLASS_IDS_CM = [x / 2 for x in range(1, 25)]  # 0.5 .. 12.0
+
+COMBIFLASH_CARTS = [
+    {"name": "RediSep Rf 4 g",   "silica_g": 4},
+    {"name": "RediSep Rf 12 g",  "silica_g": 12},
+    {"name": "RediSep Rf 24 g",  "silica_g": 24},
+    {"name": "RediSep Rf 40 g",  "silica_g": 40},
+    {"name": "RediSep Rf 80 g",  "silica_g": 80},
+    {"name": "RediSep Rf 160 g", "silica_g": 160},
+    {"name": "RediSep Rf 330 g", "silica_g": 330},
 ]
 
-def cart_for_silica(silica_g: float):
-    for g, name, price in BIOTAGE_CARTS:
-        if silica_g <= g:
-            return name, price
-    g, name, price = BIOTAGE_CARTS[-1]
-    return name, price
+PRICE_PER_24L_USD  = 120.0
+DISPOSAL_PER_L_USD = 6.0
+SILICA_COST_PER_KG = 100.0
 
-def mode_label_emoji(mode: str) -> tuple[str, str]:
-    return (
-        ("Conservative", "🛡️") if mode == "conservative" else
-        ("Efficient", "⚡")     if mode == "efficient"     else
-        ("Standard", "⚖️")
+def mode_label(mode: str) -> str:
+    return ("🛡️ Conservative" if mode == "conservative"
+            else "⚡ Efficient" if mode == "efficient"
+            else "⚖️ Standard")
+
+def cart_for_costing(silica_g: float):
+    for c in COMBIFLASH_CARTS:
+        if silica_g <= c["silica_g"]:
+            price = {4: 25, 12: 39, 24: 59, 40: 79, 80: 119, 160: 179, 330: 259}.get(c["silica_g"], 0)
+            return c["name"], price
+    last = COMBIFLASH_CARTS[-1]
+    return last["name"], 259
+
+def show_mathjax_html(path: str, height: int = 900):
+    html = Path(path).read_text(encoding="utf-8")
+    components.html(html, height=height, scrolling=True)
+
+def highlight_block(plan, autocolumn: bool):
+    if autocolumn:
+        top_line = f"<b>Vendor:</b> {plan.vendor_name or 'CombiFlash Rf+'} &nbsp;|&nbsp; <b>Cartridge:</b> {plan.cartridge_name or '—'}"
+    else:
+        size = f"{round(plan.glass_id_cm, 1)} cm ID × {round(plan.bed_height_cm)} cm bed"
+        top_line = f"<b>Column:</b> {size}"
+    final_iso = f"{round(plan.final_pctEA)}% EA"
+    inc_vol  = f"{round(plan.increment_volume_mL)} mL"
+    preeq    = f"{round(plan.pre_equilibrate_mL)} mL"
+    st.markdown(
+        f"""
+        <div style="border:1px solid #ddd;padding:10px;border-radius:8px;background:#f9f9f9;">
+        {top_line} &nbsp;|&nbsp;
+        <b>Final isocratic:</b> {final_iso} &nbsp;|&nbsp;
+        <b>Increment volume:</b> {inc_vol} &nbsp;|&nbsp;
+        <b>Pre-equilibration:</b> {preeq}
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-st.set_page_config(page_title="SmartColumn — Plan Column", page_icon="🧪", layout="wide")
-st.title("🧪 SmartColumn — Plan Column (Rf → 12 cm Bed ±2 cm + Column ID + Summary Gradient)")
-st.caption("Normal-phase silica • PE/EA • CV = porosity × bed volume; Xu-style oracle picks final %EA; STANDARD uses 2 CV increments (🛡️=3 CV, ⚡=1.5 CV)")
+def details_tables(plan):
+    method_rows = [
+        ("Vendor",                         plan.vendor_name or "—"),
+        ("Cartridge",                      plan.cartridge_name or "—"),
+        ("TLC %EA",                        f"{round(plan.tlc_pctEA)}"),
+        ("Silica (g)",                     f"{round(plan.silica_g)}"),
+        ("Packed bed vol (mL)",            f"{round(plan.packed_volume_mL)}"),
+        ("CV (mL)",                        f"{round(plan.column_volume_mL)}"),
+        ("Increment size (%EA)",           f"{round(plan.increment_size_pctEA)}"),
+        ("Final isocratic (%EA)",          f"{round(plan.final_pctEA)}"),
+        ("Final plateau (mL)",             f"{round(plan.final_plateau_mL)}"),
+        ("Predicted V̄S at TLC (mL)",      f"{round(plan.predicted_elution_tlc_mL[0])}"),
+        ("Predicted V̄E at TLC (mL)",      f"{round(plan.predicted_elution_tlc_mL[1])}"),
+        ("Predicted V̄S final (mL)",       f"{round(plan.predicted_elution_mL[0])}"),
+        ("Predicted V̄E final (mL)",       f"{round(plan.predicted_elution_mL[1])}"),
+        ("Total solvent (mL)",             f"{round(plan.total_solvent_mL)}"),
+        ("Total time (min)",               f"{round(plan.total_time_min)}"),
+    ]
+    st.table(pd.DataFrame(method_rows, columns=["Parameter", "Value"]))
 
+    cart_name, cart_price = cart_for_costing(plan.silica_g)
+    solvent_cost  = round((plan.total_solvent_mL / 24000.0) * PRICE_PER_24L_USD)
+    disposal_cost = round((plan.total_solvent_mL / 1000.0) * DISPOSAL_PER_L_USD)
+    silica_cost   = round((plan.silica_g / 1000.0) * SILICA_COST_PER_KG)
+    cost_rows = [
+        ("Loose silica (g)",            f"{round(plan.silica_g)}"),
+        ("Loose silica cost (USD)",     f"{silica_cost}"),
+        ("Suggested cartridge",         cart_name),
+        ("Cartridge cost (USD)",        f"{cart_price}"),
+        ("Solvent (mL)",                f"{round(plan.total_solvent_mL)}"),
+        ("Solvent purchase cost (USD)", f"{solvent_cost}"),
+        ("Disposal cost (USD)",         f"{disposal_cost}"),
+    ]
+    st.table(pd.DataFrame(cost_rows, columns=["Cost Item", "Value"]))
+
+# ===================== ROUTE: post_run =====================
+if st.session_state["route"] == "post_run":
+    render_post_run(
+        sb=sb,
+        default_vendor="Teledyne ISCO CombiFlash Rf+",
+        default_cartridge=st.session_state.get("last_cartridge"),
+        ref_plan=st.session_state.get("last_plan_dict"),
+        raw_inputs=st.session_state.get("raw_inputs"),
+        sample_id=st.session_state.get("last_sample_id"),
+        sample_name=st.session_state.get("last_sample_name"),
+        smiles=st.session_state.get("last_smiles"),
+        email_default=st.session_state.get("last_email"),
+    )
+    st.stop()
+
+# ===================== HEADER & CREDIT =====================
 st.markdown(
-    "#### Choosing a mode from impurity separation\n"
-    "- If nearest impurity **ΔRf ≤ 0.10** → **Conservative** (tighter bands / slower gradient)\n"
-    "- If **0.10 < ΔRf ≤ 0.30** → **Standard**\n"
-    "- If **ΔRf > 0.30** → **Efficient** (clean/easy systems)\n"
+    """
+**Built on:**
+Hao Xu, Wenchao Wu, Yuntian Chen, Dongxiao Zhang, Fanyang Mo,  
+*Explicit relation between thin film chromatography and column chromatography conditions from statistics and machine learning*,  
+**Nature Communications** (2025) 16:832. DOI: 10.1038/s41467-025-56136-x
+    """
 )
+st.title("🧪 SmartColumn")
 
+# ===================== SIDEBAR =====================
 with st.sidebar:
-    st.header("Inputs")
-    rf = st.number_input("TLC Rf (product)", min_value=0.0, max_value=0.99, value=0.30, step=0.01, format="%.2f")
-    tlc_pctEA = st.number_input("TLC %EA (PE/EA)", min_value=0.0, max_value=70.0, value=20.0, step=1.0, format="%.1f")
-    mass_g = st.number_input("Sample mass (g)", min_value=0.1, value=0.1, step=0.1, format="%.1f")
+    if _sb_err:
+        st.warning(f"Supabase not configured: {_sb_err}")
 
+    st.header("Mode")
+    ui_mode = st.selectbox(
+        "Select system",
+        options=["Autocolumn (CombiFlash Rf+)", "Hand column (glass)"],
+        index=0
+    )
+
+    st.header("Inputs")
+    rf = st.number_input("TLC Rf (product)", 0.0, 0.99, 0.30, 0.01, format="%.2f")
+    tlc_pctEA = st.number_input("TLC %EA (PE/EA)", 0.0, 70.0, 20.0, 1.0, format="%.1f")
+    mass_g = st.number_input("Sample mass (g)", 0.1, 1000.0, 5.0, 0.1, format="%.1f")
+    smiles = st.text_input("SMILES (optional)", placeholder="e.g. CC(=O)OC1=CC=CC=C1C(=O)O")
+
+    autocolumn = ui_mode.startswith("Autocolumn")
+    vendor_name = "Teledyne ISCO CombiFlash Rf+" if autocolumn else None
+    cartridge_name = None
+    silica_override_g = None
+    preeq_CV_override = None
+
+    if autocolumn:
+        cart_names = [c["name"] for c in COMBIFLASH_CARTS]
+        idx_default = 3  # default to 40 g
+        cart_sel = st.selectbox("Cartridge", options=cart_names, index=idx_default)
+        selected = next(c for c in COMBIFLASH_CARTS if c["name"] == cart_sel)
+        cartridge_name = selected["name"]
+        silica_override_g = float(selected["silica_g"])
+        preeq_CV_override = 2.0  # vendor equilibration default
+        st.session_state["last_cartridge"] = cartridge_name
+
+    st.header("View")
+    view = st.radio("View", ("Plan", "How it works"), index=0)
+
+    st.markdown("---")
+    if st.button("📥 Open Post-run Intake"):
+        # stash context and navigate
+        goto(
+            "post_run",
+            raw_inputs={
+                "rf": rf, "tlc_pctEA": tlc_pctEA, "mass_g": mass_g,
+                "silica_override_g": silica_override_g, "preeq_CV_override": preeq_CV_override,
+            },
+            last_smiles=smiles,
+        )
+
+    if st.button("🔄 Restart App"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        goto("plan")
+
+# ===================== AUX VIEW =====================
+if view == "How it works":
+    try:
+        show_mathjax_html("SmartColumn_Exact.html", height=900)
+    except Exception:
+        st.info("Documentation view not found. Add SmartColumn_Exact.html to project root.")
+    st.stop()
+
+# ===================== MAIN: PLAN UI =====================
 cfg = PlannerConfig()
 btn = st.button("Plan Column", type="primary")
 
-def render_mode(mode: str, col):
+def render_mode(mode: str, autocolumn: bool):
     plan = plan_column(
         rf=rf,
         tlc_pctEA=tlc_pctEA,
         mass_mg=mass_g * 1000.0,
         standard_ids_cm=STANDARD_GLASS_IDS_CM,
         cfg=cfg,
-        mode=mode
+        mode=mode,
+        silica_override_g=silica_override_g,
+        preeq_CV_override=preeq_CV_override,
+        vendor_name=vendor_name,
+        cartridge_name=cartridge_name
     )
-    label, emoji = mode_label_emoji(mode)
-    col.markdown(f"### {emoji} {label}")
 
-    # Costs
-    solvent_cost  = round((plan.total_solvent_mL / 24000.0) * PRICE_PER_24L_USD)
-    disposal_cost = round((plan.total_solvent_mL / 1000.0) * DISPOSAL_PER_L_USD)
-    silica_cost   = round((plan.silica_g / 1000.0) * SILICA_COST_PER_KG)
-    cart_name, cart_price = cart_for_silica(plan.silica_g)
+    st.markdown(f"### {mode_label(mode)}")
+    highlight_block(plan, autocolumn=autocolumn)
 
-    # ---- Method summary (all integers) ----
-    summary_rows = [
-        ("TLC system (%EA)",            f"{round(plan.tlc_pctEA)}"),
-        ("Silica (g)",                  f"{round(plan.silica_g)}"),
-        ("Bed height (cm)",             f"{round(plan.bed_height_cm)}"),
-        ("Column ID (cm)",              f"{round(plan.glass_id_cm)}"),
-        ("Packed bed volume (mL)",      f"{round(plan.packed_volume_mL)}"),
-        ("Column Volume, CV (mL)",      f"{round(plan.column_volume_mL)}"),
-        ("Pre-equilibrate vol (mL)",    f"{round(plan.pre_equilibrate_mL)}"),
-        ("Final isocratic (%EA)",       f"{round(plan.final_pctEA)}"),
-        ("Increment size (%EA)",        f"{round(plan.increment_size_pctEA)}"),
-        ("Increment volume (mL)",       f"{round(plan.increment_volume_mL)}"),
-        ("Final plateau volume (mL)",   f"{round(plan.final_plateau_mL)}"),
-        ("Predicted V̄S at TLC (mL)",   f"{round(plan.predicted_elution_tlc_mL[0])}"),
-        ("Predicted V̄E at TLC (mL)",   f"{round(plan.predicted_elution_tlc_mL[1])}"),
-        ("Predicted V̄S final (mL)",    f"{round(plan.predicted_elution_mL[0])}"),
-        ("Predicted V̄E final (mL)",    f"{round(plan.predicted_elution_mL[1])}"),
-        ("Total solvent (mL)",          f"{round(plan.total_solvent_mL)}"),
-        ("Total time (min)",            f"{round(plan.total_time_min)}"),
-    ]
-    col.table(pd.DataFrame(summary_rows, columns=["Parameter", "Value"]))
+    if not autocolumn:
+        default_id = round(plan.glass_id_cm * 2) / 2
+        sel_id = st.selectbox(
+            "Select available column ID (cm) and recalc",
+            options=[round(x, 1) for x in STANDARD_GLASS_IDS_CM],
+            index=[round(x, 1) for x in STANDARD_GLASS_IDS_CM].index(round(default_id, 1)),
+            key=f"sel_id_{mode}"
+        )
+        if abs(sel_id - plan.glass_id_cm) > 1e-6:
+            plan = plan_column(
+                rf=rf,
+                tlc_pctEA=tlc_pctEA,
+                mass_mg=mass_g * 1000.0,
+                standard_ids_cm=STANDARD_GLASS_IDS_CM,
+                cfg=cfg,
+                mode=mode,
+                override_id_cm=float(sel_id),
+                vendor_name=vendor_name,
+                cartridge_name=cartridge_name
+            )
+            highlight_block(plan, autocolumn=autocolumn)
 
-    # ---- Cost table (integers only) ----
-    cost_rows = [
-        ("Loose silica (g)",            f"{round(plan.silica_g)}"),
-        ("Loose silica cost (USD)",     f"{silica_cost}"),
-        ("Pre-packed cartridge",        cart_name),
-        ("Cartridge cost (USD)",        f"{cart_price}"),
-        ("Solvent (mL)",                f"{round(plan.total_solvent_mL)}"),
-        ("Solvent purchase cost (USD)", f"{solvent_cost}"),
-        ("Disposal cost (USD)",         f"{disposal_cost}"),
-    ]
-    col.table(pd.DataFrame(cost_rows, columns=["Cost Item", "Value"]))
+    with st.expander("Details & costs", expanded=True):
+        details_tables(plan)
+
+    return plan
 
 if btn:
-    st.subheader(f"Inputs → Rf: **{round(rf,2)}**, TLC: **{round(tlc_pctEA)}% EA**, mass: **{round(mass_g,1)} g**")
-    c1, c2, c3 = st.columns(3, gap="large")
-    render_mode("conservative", c1)
-    render_mode("standard",     c2)
-    render_mode("efficient",    c3)
+    hdr = f"Inputs → Rf: {round(rf, 2)}, TLC: {round(tlc_pctEA)}% EA, mass: {round(mass_g, 1)} g"
+    if smiles:
+        hdr += f"  |  Structure (SMILES): `{smiles}`"
+    if autocolumn:
+        hdr += f"  |  System: CombiFlash Rf+ · {cartridge_name}"
+    else:
+        hdr += "  |  System: Hand column"
+    st.subheader(hdr)
 
-    st.divider()
-    st.markdown("**Notes**")
-    st.markdown(
-        "- **CV** = porosity × bed volume; with ε≈0.4, a 12 cm × 1.3 cm bed is ≈16 mL packed, **CV ≈ 6 mL**.\n"
-        "- **Silica grams** come from the load rule (x-ratio); Xu et al. used fixed columns and provide the **Rf + PE:EA → V̄S,V̄E** mapping (not silica sizing).\n"
-        "- **STANDARD** uses **2 CV** for pre-eq & increments (🛡️ 3 CV, ⚡ 1.5 CV). **Final plateau** is **3 × increment**.\n"
-        "- We keep the bed near **12 cm**; if a change > ±2 cm would be needed, we **choose a wider/narrower standard ID**."
-    )
+    c1, c2, c3 = st.columns(3, gap="large")
+    with c1: plan_cons = render_mode("conservative", autocolumn)
+    with c2: plan_std  = render_mode("standard", autocolumn)
+    with c3: plan_eff  = render_mode("efficient", autocolumn)
+
+    # Stash canonical STANDARD plan + raw inputs for post-run
+    st.session_state["last_plan_dict"] = asdict(plan_std)
+    st.session_state["raw_inputs"] = {
+        "rf": rf, "tlc_pctEA": tlc_pctEA, "mass_g": mass_g,
+        "silica_override_g": silica_override_g, "preeq_CV_override": preeq_CV_override,
+    }
+    st.session_state["last_smiles"] = smiles
 else:
-    st.info("Enter Rf, TLC %EA, and mass (g), then click **Plan Column** to see three mode summaries and costs.")
+    st.info("Set inputs, pick **CombiFlash Rf+** cartridge (or Hand column), then click **Plan Column**.")

@@ -1,0 +1,33 @@
+{
+  "vendors": [
+    {
+      "name": "Biotage",
+      "equil_CV_default": 2.0,
+      "export": { "csv": true, "pdf": true, "xml": true },
+      "cartridges": [
+        { "name": "Sfär 10 g",  "silica_g": 10,  "particle_um": "40-63" },
+        { "name": "Sfär 25 g",  "silica_g": 25,  "particle_um": "40-63" },
+        { "name": "Sfär 50 g",  "silica_g": 50,  "particle_um": "40-63" },
+        { "name": "Sfär 100 g", "silica_g": 100, "particle_um": "40-63" },
+        { "name": "Sfär 185 g", "silica_g": 185, "particle_um": "40-63" },
+        { "name": "Sfär 340 g", "silica_g": 340, "particle_um": "40-63" },
+        { "name": "Sfär 500 g", "silica_g": 500, "particle_um": "40-63" }
+      ],
+      "load_bands": { "easy_pct": 0.20, "typical_pct": 0.10, "hard_pct": 0.02 }
+    },
+    {
+      "name": "Teledyne ISCO",
+      "equil_CV_default": 2.0,
+      "export": { "csv": true, "pdf": true, "xml": false, "txt": true },
+      "cartridges": [
+        { "name": "RediSep 12 g",  "silica_g": 12,  "particle_um": "40-63" },
+        { "name": "RediSep 24 g",  "silica_g": 24,  "particle_um": "40-63" },
+        { "name": "RediSep 40 g",  "silica_g": 40,  "particle_um": "40-63" },
+        { "name": "RediSep 80 g",  "silica_g": 80,  "particle_um": "40-63" },
+        { "name": "RediSep 160 g", "silica_g": 160, "particle_um": "40-63" },
+        { "name": "RediSep 330 g", "silica_g": 330, "particle_um": "40-63" }
+      ],
+      "load_bands": { "easy_pct": 0.20, "typical_pct": 0.10, "hard_pct": 0.02 }
+    }
+  ]
+}
