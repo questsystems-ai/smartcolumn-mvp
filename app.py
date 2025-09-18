@@ -4,6 +4,29 @@ from __future__ import annotations
 # ---- MUST be the first Streamlit call ----
 import streamlit as st
 st.set_page_config(page_title="SmartColumn", page_icon="🧪", layout="wide")
+# Bigger plan selector tabs (🛡️ / ⚖️ / ⚡)
+st.markdown("""
+<style>
+/* All tabs: bigger text, comfy padding, don’t wrap */
+div.stTabs [role="tab"] {
+  font-size: 1.30rem;
+  padding: 0.55rem 1.0rem;
+  white-space: nowrap;
+}
+
+/* Selected tab: even larger + bold */
+div.stTabs [role="tab"][aria-selected="true"] {
+  font-size: 1.50rem;
+  font-weight: 800;
+}
+
+/* Keep labels readable on narrow screens */
+@media (max-width: 900px) {
+  div.stTabs [role="tab"] { font-size: 1.12rem; }
+  div.stTabs [role="tab"][aria-selected="true"] { font-size: 1.28rem; }
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ---- Imports (no UI at import-time) ----
 from dataclasses import asdict
@@ -151,8 +174,8 @@ def details_tables(plan):
     ]
     st.table(pd.DataFrame(cost_rows, columns=["Cost Item", "Value"]))
 
-def render_combiflash_method(plan):
-    """Show a vendor-ready CombiFlash method: continuous gradient points (no step increments)."""
+def render_combiflash_method(plan, key_suffix: str = ""):
+    """Vendor-ready CombiFlash method: continuous gradient (no step increments)."""
     cv_mL = float(plan.column_volume_mL)
     flow = float(plan.flow_mL_min)
 
@@ -162,15 +185,14 @@ def render_combiflash_method(plan):
 
     time_per_cv_min = cv_mL / max(1e-6, flow)
 
-    # Continuous ramp: 0 %B at 0 CV → final %B at ~3.5 CV, then a short hold (from plan)
+    # Continuous ramp: 0 %B at 0 CV → final %B at ~3.5 CV, then hold (from plan)
     ramp_end_CV = 3.5
     hold_CV = plan.final_plateau_mL / max(1e-6, cv_mL)
 
-    include_flush = st.checkbox("Include 90% B flush", value=True, key=f"flush_{plan.mode}")
+    include_flush = st.checkbox("Include 90% B flush", value=True, key=f"flush_{key_suffix or 'global'}")
     flush_CV = 0.5 if include_flush else 0.0
 
-    # Settings table (concise & legible)
-    st.subheader("CombiFlash Method (enter these)")
+    # Settings table (concise)
     settings_df = pd.DataFrame(
         [
             ["Solvent A", "Hexane (PE)"],
@@ -182,7 +204,7 @@ def render_combiflash_method(plan):
     )
     st.table(settings_df)
 
-    # Gradient points (the instrument interpolates between points)
+    # Gradient points (the instrument linearly interpolates between points)
     points = []
     # P1: start
     points.append({"Point": "P1", "%B (EA)": 0.0, "CV target": 0.00, "Time (min)": 0.0})
@@ -202,7 +224,7 @@ def render_combiflash_method(plan):
         points.append({"Point": "P4", "%B (EA)": 90.0,
                        "CV target": round(cv4, 2), "Time (min)": round(t4, 1)})
 
-    st.caption("Gradient points (the instrument interpolates between points)")
+    st.caption("Gradient points (instrument interpolates between points)")
     st.dataframe(
         pd.DataFrame(points, columns=["Point", "%B (EA)", "CV target", "Time (min)"]),
         use_container_width=True,
@@ -327,13 +349,13 @@ def render_mode(mode: str, autocolumn_flag: bool):
     highlight_block(plan, autocolumn=autocolumn_flag)
 
     if not autocolumn_flag:
-        # Hand-column: allow ID picker & show details/costs (safe to keep inside the column)
+        # Hand-column: keep ID picker and details inside the column
         default_id = round(plan.glass_id_cm * 2) / 2
         sel_id = st.selectbox(
             "Select available column ID (cm) and recalc",
             options=[round(x, 1) for x in STANDARD_GLASS_IDS_CM],
             index=[round(x, 1) for x in STANDARD_GLASS_IDS_CM].index(round(default_id, 1)),
-            key=f"sel_id_{mode}"
+            key=f"sel_id_{mode}",
         )
         if abs(sel_id - plan.glass_id_cm) > 1e-6:
             plan = plan_column(
@@ -345,7 +367,7 @@ def render_mode(mode: str, autocolumn_flag: bool):
                 mode=mode,
                 override_id_cm=float(sel_id),
                 vendor_name=None,
-                cartridge_name=None
+                cartridge_name=None,
             )
             highlight_block(plan, autocolumn=False)
 
@@ -362,16 +384,26 @@ if btn:
         hdr += "  |  System: Hand column"
     st.subheader(hdr)
 
-    # Three side-by-side plan cards
-    c1, c2, c3 = st.columns(3, gap="large")
-    with c1: plan_cons = render_mode("conservative", autocolumn)
-    with c2: plan_std  = render_mode("standard", autocolumn)
-    with c3: plan_eff  = render_mode("efficient", autocolumn)
+    # Three plan cards in tabs (robust on any screen width)
+    tab_cons, tab_std, tab_eff = st.tabs(["🛡️ Conservative", "⚖️ Standard", "⚡ Efficient"])
 
-    # Show the vendor entry table ONCE, full width so it won't be clipped
-    if autocolumn:
-        st.markdown("#### CombiFlash Method (standard plan)")
-        render_combiflash_method(plan_std)
+    with tab_cons:
+        plan_cons = render_mode("conservative", autocolumn)
+        if autocolumn:
+            st.markdown("#### CombiFlash Method (conservative plan)")
+            render_combiflash_method(plan_cons, key_suffix="cons")
+
+    with tab_std:
+        plan_std  = render_mode("standard", autocolumn)
+        if autocolumn:
+            st.markdown("#### CombiFlash Method (standard plan)")
+            render_combiflash_method(plan_std, key_suffix="std")
+
+    with tab_eff:
+        plan_eff  = render_mode("efficient", autocolumn)
+        if autocolumn:
+            st.markdown("#### CombiFlash Method (efficient plan)")
+            render_combiflash_method(plan_eff, key_suffix="eff")
 
     # Stash canonical STANDARD plan + raw inputs for post-run
     st.session_state["last_plan_dict"] = asdict(plan_std)
@@ -381,4 +413,3 @@ if btn:
     }
 else:
     st.info("Set inputs, pick **CombiFlash Rf+** cartridge (or Hand column), then click **Plan Column**.")
-
