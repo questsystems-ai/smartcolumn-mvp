@@ -31,11 +31,10 @@ def get_sb() -> Optional[SupabaseClient]:
     return create_client(url, key)
 
 def upload_bytes(sb, bucket: str, path: str, data: bytes, content_type: str | None = None) -> str:
-    """Upload bytes to Supabase Storage by writing a temp file (storage3 expects a path)."""
+    """Upload bytes to Supabase Storage using a temp file and keyword args."""
     if content_type is None:
         content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
 
-    # write to a temp file because storage3.upload() tries open(file, 'rb')
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
@@ -43,10 +42,9 @@ def upload_bytes(sb, bucket: str, path: str, data: bytes, content_type: str | No
             tmp.flush()
             tmp_path = tmp.name
 
-        # upsert so repeated tests don't fail on "already exists"
+        # IMPORTANT: use keyword args; some SDK versions misinterpret positionals
         file_options = {"content_type": content_type, "upsert": True}
-
-        sb.storage.from_(bucket).upload(path, tmp_path, file_options)
+        sb.storage.from_(bucket).upload(path=path, file=tmp_path, file_options=file_options)
         return path
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -54,7 +52,6 @@ def upload_bytes(sb, bucket: str, path: str, data: bytes, content_type: str | No
                 os.remove(tmp_path)
             except Exception:
                 pass
-
 
 # ---------- Optional planner import (for on-the-fly plan) ----------
 STANDARD_GLASS_IDS_CM = [x / 2 for x in range(1, 25)]  # 0.5..12.0
@@ -323,22 +320,26 @@ def render_post_run(
         run_uuid = str(uuid.uuid4())
         export_path = None
         tlc_path = None
-        # For vendor export
+        # Vendor export
         if run_file is not None:
             export_path = f"{run_uuid}/{run_file.name}"
             upload_bytes(
-                sb, "vendor_exports", export_path,
-                run_file.getvalue(),
-                content_type=(run_file.type or "text/plain")
+                sb,
+                bucket="vendor_exports",
+                path=export_path,
+                data=run_file.getvalue(),
+                content_type=(run_file.type or "text/plain"),
             )
 
-        # For TLC image
+        # TLC image
         if tlc_photo is not None:
             tlc_path = f"{run_uuid}/{tlc_photo.name}"
             upload_bytes(
-                sb, "tlc_images", tlc_path,
-                tlc_photo.getvalue(),
-                content_type=(tlc_photo.type or "image/png")
+                sb,
+                bucket="tlc_images",
+                path=tlc_path,
+                data=tlc_photo.getvalue(),
+                content_type=(tlc_photo.type or "image/png"),
             )
 
 
