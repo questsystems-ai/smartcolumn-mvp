@@ -6,6 +6,13 @@ import pandas as pd
 import streamlit as st
 import os, io, uuid, re, tempfile, mimetypes  # add tempfile, mimetypes
 
+def _top_right_restart():
+    right = st.columns([6, 2])[1]
+    if right.button("🔄 Restart App", use_container_width=True, key="restart_top"):
+        for k in list(st.session_state.keys()):
+            del st.session_state[k]
+        st.rerun()
+
 # --- Storage helpers ---
 def ensure_bucket(sb, bucket: str, public: bool = False) -> bool:
     """
@@ -261,20 +268,31 @@ def render_post_run(
 ):
     """Post-run intake. On Submit: saves sample, plan (if needed), uploads, inserts run."""
     # (Keep your topbar/restart if you still have it)
+    _top_right_restart()
     st.title("📥 Post-run intake")
 
     # ---- Context ----
+    # ---- Context (brand/cartridge display, then required email + SMILES) ----
     with st.expander("Context", expanded=True):
-        top = st.columns(4)
-        vendor = top[0].text_input("Vendor / System", value=default_vendor or "")
-        cartridge = top[1].text_input("Cartridge", value=default_cartridge or "")
-        email = top[2].text_input("Your email (required)", value=email_default or "", placeholder="name@lab.org")
-        top[3].markdown(f"**SMILES:** `{smiles}`" if smiles else "&nbsp;")
+        # Row 1: carried-over brand + cartridge (display only)
+        vendor = default_vendor or ""
+        cartridge = default_cartridge or ""
+        r1c1, r1c2 = st.columns(2)
+        r1c1.markdown(f"**System:** {vendor}")
+        r1c2.markdown(f"**Cartridge:** {cartridge}")
 
+        # Row 2: required Email + SMILES
+        r2c1, r2c2 = st.columns(2)
+        email_val = r2c1.text_input("Email (required)", value=email_default or "", placeholder="name@lab.org")
+        smiles_val = r2c2.text_input("SMILES (required)", value=smiles or "", placeholder="CC(=O)OC1=CC=CC=C1C(=O)O")
+
+        # cache for downstream use
         st.session_state["_post_vendor"] = vendor
         st.session_state["_post_cartridge"] = cartridge
-        st.session_state["_post_email"] = email
+        st.session_state["_post_email"] = email_val
+        st.session_state["_post_smiles"] = smiles_val
 
+        # planned refs (if provided)
         if ref_plan:
             m = st.columns(3)
             m[0].metric("Planned final %EA", f"{round(ref_plan.get('final_pctEA', 0))}%")
@@ -331,13 +349,16 @@ def render_post_run(
 
         if save:
             # email required
+            # email + smiles required
             email_val = (st.session_state.get("_post_email") or "").strip()
+            smiles_val = (st.session_state.get("_post_smiles") or "").strip()
             if not _EMAIL_RE.match(email_val):
-                st.error("Please enter a valid email address (required).")
-                st.stop()
+                st.error("Please enter a valid email address (required)."); st.stop()
+            if not smiles_val:
+                st.error("Please enter a SMILES string (required)."); st.stop()
             if sb is None:
-                st.error("Supabase is not configured (missing env or client).")
-                st.stop()
+                st.error("Supabase is not configured (missing env or client)."); st.stop()
+
 
             # ensure plan (insert if needed)
             vendor = st.session_state.get("_post_vendor")
@@ -391,7 +412,7 @@ def render_post_run(
                 "export_path": export_path,
                 "tlc_image_path": tlc_path,
                 "sample_id": sample_id,
-                "smiles": smiles,
+                "smiles": smiles_val,
             }
             try:
                 res = sb.table("runs").insert(row_run).execute()

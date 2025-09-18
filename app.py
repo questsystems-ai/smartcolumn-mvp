@@ -173,8 +173,8 @@ def render_combiflash_method(plan):
     st.subheader("CombiFlash Method (enter these)")
     settings_df = pd.DataFrame(
         [
-            ["Solvent A", SOLVENT_A_NAME],
-            ["Solvent B", SOLVENT_B_NAME],
+            ["Solvent A", "Hexane (PE)"],
+            ["Solvent B", "Ethyl acetate (EA)"],
             ["Flow (mL/min)", f"{flow_disp}"],
             ["Equilibrate (mL)", f"{preeq_disp}"],
         ],
@@ -182,7 +182,7 @@ def render_combiflash_method(plan):
     )
     st.table(settings_df)
 
-    # Gradient points (instrument linearly interpolates between points)
+    # Gradient points (the instrument interpolates between points)
     points = []
     # P1: start
     points.append({"Point": "P1", "%B (EA)": 0.0, "CV target": 0.00, "Time (min)": 0.0})
@@ -203,7 +203,11 @@ def render_combiflash_method(plan):
                        "CV target": round(cv4, 2), "Time (min)": round(t4, 1)})
 
     st.caption("Gradient points (the instrument interpolates between points)")
-    st.table(pd.DataFrame(points, columns=["Point", "%B (EA)", "CV target", "Time (min)"]))
+    st.dataframe(
+        pd.DataFrame(points, columns=["Point", "%B (EA)", "CV target", "Time (min)"]),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 # ===================== ROUTE: post_run =====================
 if st.session_state["route"] == "post_run":
@@ -215,7 +219,6 @@ if st.session_state["route"] == "post_run":
         raw_inputs=st.session_state.get("raw_inputs"),
         sample_id=st.session_state.get("last_sample_id"),
         sample_name=st.session_state.get("last_sample_name"),
-        smiles=st.session_state.get("last_smiles"),
         email_default=st.session_state.get("last_email"),
     )
     st.stop()
@@ -247,8 +250,7 @@ with st.sidebar:
     rf = st.number_input("TLC Rf (product)", 0.0, 0.99, 0.30, 0.01, format="%.2f")
     tlc_pctEA = st.number_input("TLC %EA (PE/EA)", 0.0, 70.0, 20.0, 1.0, format="%.1f")
     mass_g = st.number_input("Sample mass (g)", 0.1, 1000.0, 5.0, 0.1, format="%.1f")
-    smiles = st.text_input("SMILES (optional)", placeholder="e.g. CC(=O)OC1=CC=CC=C1C(=O)O")
-
+ 
     autocolumn = ui_mode.startswith("Autocolumn")
     vendor_name = "Teledyne ISCO CombiFlash Rf+" if autocolumn else None
     cartridge_name = None
@@ -270,14 +272,12 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("📥 Open Post-run Intake"):
-        # stash context and navigate
         goto(
             "post_run",
             raw_inputs={
                 "rf": rf, "tlc_pctEA": tlc_pctEA, "mass_g": mass_g,
                 "silica_override_g": silica_override_g, "preeq_CV_override": preeq_CV_override,
             },
-            last_smiles=smiles,
         )
 
     if st.button("🔄 Restart App"):
@@ -359,8 +359,6 @@ def render_mode(mode: str, autocolumn_flag: bool):
 
 if btn:
     hdr = f"Inputs → Rf: {round(rf, 2)}, TLC: {round(tlc_pctEA)}% EA, mass: {round(mass_g, 1)} g"
-    if smiles:
-        hdr += f"  |  Structure (SMILES): `{smiles}`"
     if autocolumn:
         hdr += f"  |  System: CombiFlash Rf+ · {cartridge_name}"
     else:
@@ -378,6 +376,5 @@ if btn:
         "rf": rf, "tlc_pctEA": tlc_pctEA, "mass_g": mass_g,
         "silica_override_g": silica_override_g, "preeq_CV_override": preeq_CV_override,
     }
-    st.session_state["last_smiles"] = smiles
 else:
     st.info("Set inputs, pick **CombiFlash Rf+** cartridge (or Hand column), then click **Plan Column**.")
