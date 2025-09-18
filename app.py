@@ -273,6 +273,18 @@ with st.sidebar:
             del st.session_state[k]
         goto("plan")
 
+# --- Motivation block shown on the home page before planning ---
+if st.session_state.get("route") == "plan" and 'view' in locals() and view == "Plan":
+    st.markdown("""
+### Why help train this system?
+Your help is needed to lock in a working method for completing the data chain from **TLC → column conditions**, by adding the column conditions to a practical plug-and-play column protocol. Ultimately this saves **time, money, and solvent waste** for organic chemistry labs.
+
+**Authorship credit:** Every user who submits **clean post-run data** and a **SMILES** string for the target molecule will receive credit on an eventual publication, with **top contributors** added to the **main authorship list**.
+
+Thanks for helping bring the dream of **fully automated synthesis** closer to reality!
+""")
+
+
 # ===================== AUX VIEW =====================
 if view == "How it works":
     try:
