@@ -12,15 +12,8 @@ import streamlit.components.v1 as components
 from pathlib import Path
 
 from planner.planner import plan_column, PlannerConfig
-from post_run import render_post_run, get_sb
-
-from db_supabase import get_sb
-sb = None
-try:
-    sb = get_sb()
-except Exception as e:
-    sb = None
-    st.sidebar.warning(f"Supabase not configured: {e}")
+from post_run import render_post_run
+from db_supabase import get_sb  # loads .env locally and st.secrets in cloud
 
 # ----------------- Supabase init (no UI here) -----------------
 sb = None
@@ -54,9 +47,14 @@ COMBIFLASH_CARTS = [
     {"name": "RediSep Rf 330 g", "silica_g": 330},
 ]
 
+# Rough cost placeholders
 PRICE_PER_24L_USD  = 120.0
 DISPOSAL_PER_L_USD = 6.0
 SILICA_COST_PER_KG = 100.0
+
+# Solvent names for PE/EA system used in TLC
+SOLVENT_A_NAME = "Hexane (PE)"
+SOLVENT_B_NAME = "Ethyl acetate (EA)"
 
 def mode_label(mode: str) -> str:
     return ("🛡️ Conservative" if mode == "conservative"
@@ -76,27 +74,42 @@ def show_mathjax_html(path: str, height: int = 900):
     components.html(html, height=height, scrolling=True)
 
 def highlight_block(plan, autocolumn: bool):
+    """Top summary strip. In autocolumn mode, do NOT show 'increment'."""
     if autocolumn:
-        top_line = f"<b>Vendor:</b> {plan.vendor_name or 'CombiFlash Rf+'} &nbsp;|&nbsp; <b>Cartridge:</b> {plan.cartridge_name or '—'}"
+        top_line = (
+            f"<b>Vendor:</b> {plan.vendor_name or 'CombiFlash Rf+'} &nbsp;|&nbsp; "
+            f"<b>Cartridge:</b> {plan.cartridge_name or '—'}"
+        )
     else:
         size = f"{round(plan.glass_id_cm, 1)} cm ID × {round(plan.bed_height_cm)} cm bed"
         top_line = f"<b>Column:</b> {size}"
+
     final_iso = f"{round(plan.final_pctEA)}% EA"
-    inc_vol  = f"{round(plan.increment_volume_mL)} mL"
     preeq    = f"{round(plan.pre_equilibrate_mL)} mL"
+    flow     = f"{round(plan.flow_mL_min, 1)} mL/min"
+
+    if autocolumn:
+        # No increment shown for autocolumn
+        mid = f"<b>Final isocratic:</b> {final_iso} &nbsp;|&nbsp; <b>Equilibration:</b> {preeq} &nbsp;|&nbsp; <b>Flow:</b> {flow}"
+    else:
+        inc_vol = f"{round(plan.increment_volume_mL)} mL"
+        mid = (f"<b>Final isocratic:</b> {final_iso} &nbsp;|&nbsp; "
+               f"<b>%EA increment:</b> 5% &nbsp;|&nbsp; "
+               f"<b>Increment volume:</b> {inc_vol} &nbsp;|&nbsp; "
+               f"<b>Pre-equilibration:</b> {preeq} &nbsp;|&nbsp; "
+               f"<b>Flow:</b> {flow}")
+
     st.markdown(
         f"""
         <div style="border:1px solid #ddd;padding:10px;border-radius:8px;background:#f9f9f9;">
-        {top_line} &nbsp;|&nbsp;
-        <b>Final isocratic:</b> {final_iso} &nbsp;|&nbsp;
-        <b>Increment volume:</b> {inc_vol} &nbsp;|&nbsp;
-        <b>Pre-equilibration:</b> {preeq}
+        {top_line} &nbsp;|&nbsp; {mid}
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 def details_tables(plan):
+    """Generic details + costs (used mainly in hand-column mode)."""
     method_rows = [
         ("Vendor",                         plan.vendor_name or "—"),
         ("Cartridge",                      plan.cartridge_name or "—"),
@@ -104,7 +117,7 @@ def details_tables(plan):
         ("Silica (g)",                     f"{round(plan.silica_g)}"),
         ("Packed bed vol (mL)",            f"{round(plan.packed_volume_mL)}"),
         ("CV (mL)",                        f"{round(plan.column_volume_mL)}"),
-        ("Increment size (%EA)",           f"{round(plan.increment_size_pctEA)}"),
+        ("Increment size (%EA)",           f"{5}"),
         ("Final isocratic (%EA)",          f"{round(plan.final_pctEA)}"),
         ("Final plateau (mL)",             f"{round(plan.final_plateau_mL)}"),
         ("Predicted V̄S at TLC (mL)",      f"{round(plan.predicted_elution_tlc_mL[0])}"),
@@ -130,6 +143,55 @@ def details_tables(plan):
         ("Disposal cost (USD)",         f"{disposal_cost}"),
     ]
     st.table(pd.DataFrame(cost_rows, columns=["Cost Item", "Value"]))
+
+def render_combiflash_method(plan):
+    """Show a vendor-ready CombiFlash method: continuous gradient points (no step increments)."""
+    cv_mL = float(plan.column_volume_mL)
+    flow = float(plan.flow_mL_min)
+    time_per_cv_min = cv_mL / max(1e-6, flow)
+
+    # Choose a simple 2-point ramp: 0 %B at 0 CV -> final %B at ~3.5 CV
+    # Then hold at final %B for the planned plateau duration (converted to CV)
+    ramp_end_CV = 3.5
+    hold_CV = plan.final_plateau_mL / max(1e-6, cv_mL)
+
+    # Optional flush as 90 %B for 0.5 CV
+    include_flush = st.checkbox("Include 90% B flush", value=True, key=f"flush_{plan.mode}")
+    flush_CV = 0.5 if include_flush else 0.0
+
+    points = []
+    # P1: start
+    points.append(
+        {"Point": "P1", "%B (EA)": 0.0, "CV target": 0.0, "Time (min)": 0.0}
+    )
+    # P2: end of ramp
+    t2 = ramp_end_CV * time_per_cv_min
+    points.append(
+        {"Point": "P2", "%B (EA)": round(plan.final_pctEA, 1), "CV target": round(ramp_end_CV, 2), "Time (min)": round(t2, 1)}
+    )
+    # P3: end of hold
+    cv3 = ramp_end_CV + hold_CV
+    t3 = cv3 * time_per_cv_min
+    points.append(
+        {"Point": "P3", "%B (EA)": round(plan.final_pctEA, 1), "CV target": round(cv3, 2), "Time (min)": round(t3, 1)}
+    )
+    # P4: optional flush
+    if include_flush and flush_CV > 0:
+        cv4 = cv3 + flush_CV
+        t4 = cv4 * time_per_cv_min
+        points.append(
+            {"Point": "P4", "%B (EA)": 90.0, "CV target": round(cv4, 2), "Time (min)": round(t4, 1)}
+        )
+
+    st.subheader("CombiFlash Method (enter these)")
+    cols = st.columns(4)
+    cols[0].metric("Solvent A", SOLVENT_A_NAME)
+    cols[1].metric("Solvent B", SOLVENT_B_NAME)
+    cols[2].metric("Flow", f"{round(flow,1)} mL/min")
+    cols[3].metric("Equilibrate", f"{round(plan.pre_equilibrate_mL)} mL")
+
+    st.caption("Gradient points (instrument linearly interpolates between points)")
+    st.table(pd.DataFrame(points, columns=["Point", "%B (EA)", "CV target", "Time (min)"]))
 
 # ===================== ROUTE: post_run =====================
 if st.session_state["route"] == "post_run":
@@ -223,7 +285,7 @@ if view == "How it works":
 cfg = PlannerConfig()
 btn = st.button("Plan Column", type="primary")
 
-def render_mode(mode: str, autocolumn: bool):
+def render_mode(mode: str, autocolumn_flag: bool):
     plan = plan_column(
         rf=rf,
         tlc_pctEA=tlc_pctEA,
@@ -238,9 +300,13 @@ def render_mode(mode: str, autocolumn: bool):
     )
 
     st.markdown(f"### {mode_label(mode)}")
-    highlight_block(plan, autocolumn=autocolumn)
+    highlight_block(plan, autocolumn=autocolumn_flag)
 
-    if not autocolumn:
+    if autocolumn_flag:
+        # Show vendor-ready CombiFlash method
+        render_combiflash_method(plan)
+    else:
+        # Hand-column: allow ID picker & show details/costs
         default_id = round(plan.glass_id_cm * 2) / 2
         sel_id = st.selectbox(
             "Select available column ID (cm) and recalc",
@@ -260,10 +326,10 @@ def render_mode(mode: str, autocolumn: bool):
                 vendor_name=vendor_name,
                 cartridge_name=cartridge_name
             )
-            highlight_block(plan, autocolumn=autocolumn)
+            highlight_block(plan, autocolumn=autocolumn_flag)
 
-    with st.expander("Details & costs", expanded=True):
-        details_tables(plan)
+        with st.expander("Details & costs", expanded=True):
+            details_tables(plan)
 
     return plan
 
