@@ -6,6 +6,43 @@ import pandas as pd
 import streamlit as st
 import os, io, uuid, re, tempfile, mimetypes  # add tempfile, mimetypes
 
+# --- Storage helpers ---
+def ensure_bucket(sb, bucket: str, public: bool = False) -> bool:
+    """
+    Returns True if bucket exists (or was created); False if we don't have permission
+    or couldn't create it. Requires service role key to create.
+    """
+    try:
+        # list("") will 404 if the bucket doesn't exist
+        sb.storage.from_(bucket).list(path="")
+        return True
+    except Exception:
+        try:
+            # service-role key can create buckets; anon key cannot
+            sb.storage.create_bucket(bucket, public=public)
+            return True
+        except Exception:
+            return False
+
+def upload_bytes(sb, bucket: str, path: str, data: bytes) -> str:
+    """Upload bytes using a temp file; avoid file_options (SDK header bug)."""
+    import tempfile, os
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(data); tmp.flush()
+            tmp_path = tmp.name
+        # Idempotent re-upload
+        try:
+            sb.storage.from_(bucket).remove([path])
+        except Exception:
+            pass
+        sb.storage.from_(bucket).upload(path=path, file=tmp_path)
+        return path
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try: os.remove(tmp_path)
+            except Exception: pass
 
 # ---------- Supabase (TYPE_CHECKING-safe) ----------
 try:
@@ -323,26 +360,24 @@ def render_post_run(
         run_uuid = str(uuid.uuid4())
         export_path = None
         tlc_path = None
-        
+
         # Vendor export
         if run_file is not None:
             export_path = f"{run_uuid}/{run_file.name}"
-            upload_bytes(
-                sb,
-                bucket="vendor_exports",
-                path=export_path,
-                data=run_file.getvalue(),
-            )
+            try:
+                upload_bytes(sb, "vendor_exports", export_path, run_file.getvalue())
+            except Exception as e:
+                st.error(f"Export upload failed for '{export_path}': {e}")
+                return
 
         # TLC image
         if tlc_photo is not None:
             tlc_path = f"{run_uuid}/{tlc_photo.name}"
-            upload_bytes(
-                sb,
-                bucket="tlc_images",
-                path=tlc_path,
-                data=tlc_photo.getvalue(),
-            )
+            try:
+                upload_bytes(sb, "tlc_images", tlc_path, tlc_photo.getvalue())
+            except Exception as e:
+                st.error(f"TLC upload failed for '{tlc_path}': {e}")
+                return
 
 
         # insert run row
