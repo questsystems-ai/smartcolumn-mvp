@@ -30,21 +30,24 @@ def get_sb() -> Optional[SupabaseClient]:
         return None
     return create_client(url, key)
 
-def upload_bytes(sb, bucket: str, path: str, data: bytes, content_type: str | None = None) -> str:
-    """Upload bytes to Supabase Storage using a temp file and keyword args."""
-    if content_type is None:
-        content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
-
+def upload_bytes(sb, bucket: str, path: str, data: bytes) -> str:
+    """Upload bytes to Supabase Storage using a temp file; avoid file_options entirely."""
     tmp_path = None
     try:
+        # write to a temp file because storage3.upload() expects a file path and will open(...)
         with tempfile.NamedTemporaryFile(delete=False) as tmp:
             tmp.write(data)
             tmp.flush()
             tmp_path = tmp.name
 
-        # IMPORTANT: use keyword args; some SDK versions misinterpret positionals
-        file_options = {"content_type": content_type, "upsert": True}
-        sb.storage.from_(bucket).upload(path=path, file=tmp_path, file_options=file_options)
+        # make re-uploads idempotent
+        try:
+            sb.storage.from_(bucket).remove([path])
+        except Exception:
+            pass
+
+        # IMPORTANT: no file_options here (avoids header-type errors)
+        sb.storage.from_(bucket).upload(path=path, file=tmp_path)
         return path
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -320,6 +323,7 @@ def render_post_run(
         run_uuid = str(uuid.uuid4())
         export_path = None
         tlc_path = None
+        
         # Vendor export
         if run_file is not None:
             export_path = f"{run_uuid}/{run_file.name}"
@@ -328,7 +332,6 @@ def render_post_run(
                 bucket="vendor_exports",
                 path=export_path,
                 data=run_file.getvalue(),
-                content_type=(run_file.type or "text/plain"),
             )
 
         # TLC image
@@ -339,7 +342,6 @@ def render_post_run(
                 bucket="tlc_images",
                 path=tlc_path,
                 data=tlc_photo.getvalue(),
-                content_type=(tlc_photo.type or "image/png"),
             )
 
 
