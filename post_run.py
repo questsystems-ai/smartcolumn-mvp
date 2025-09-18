@@ -4,6 +4,8 @@ import io, uuid, re
 from typing import Optional, Dict, Any, TYPE_CHECKING
 import pandas as pd
 import streamlit as st
+import os, io, uuid, re, tempfile, mimetypes  # add tempfile, mimetypes
+
 
 # ---------- Supabase (TYPE_CHECKING-safe) ----------
 try:
@@ -28,15 +30,31 @@ def get_sb() -> Optional[SupabaseClient]:
         return None
     return create_client(url, key)
 
-def upload_bytes(sb: SupabaseClient, bucket: str, path: str, data: bytes) -> str:
-    """Upload bytes to Supabase Storage; returns path (throws on failure)."""
-    f = io.BytesIO(data)
+def upload_bytes(sb, bucket: str, path: str, data: bytes, content_type: str | None = None) -> str:
+    """Upload bytes to Supabase Storage by writing a temp file (storage3 expects a path)."""
+    if content_type is None:
+        content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+
+    # write to a temp file because storage3.upload() tries open(file, 'rb')
+    tmp_path = None
     try:
-        sb.storage.from_(bucket).remove([path])  # overwrite if exists
-    except Exception:
-        pass
-    sb.storage.from_(bucket).upload(path, f)
-    return path
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp.write(data)
+            tmp.flush()
+            tmp_path = tmp.name
+
+        # upsert so repeated tests don't fail on "already exists"
+        file_options = {"content_type": content_type, "upsert": True}
+
+        sb.storage.from_(bucket).upload(path, tmp_path, file_options)
+        return path
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
 
 # ---------- Optional planner import (for on-the-fly plan) ----------
 STANDARD_GLASS_IDS_CM = [x / 2 for x in range(1, 25)]  # 0.5..12.0
@@ -305,12 +323,24 @@ def render_post_run(
         run_uuid = str(uuid.uuid4())
         export_path = None
         tlc_path = None
+        # For vendor export
         if run_file is not None:
             export_path = f"{run_uuid}/{run_file.name}"
-            upload_bytes(sb, "vendor_exports", export_path, run_file.getvalue())
+            upload_bytes(
+                sb, "vendor_exports", export_path,
+                run_file.getvalue(),
+                content_type=(run_file.type or "text/plain")
+            )
+
+        # For TLC image
         if tlc_photo is not None:
             tlc_path = f"{run_uuid}/{tlc_photo.name}"
-            upload_bytes(sb, "tlc_images", tlc_path, tlc_photo.getvalue())
+            upload_bytes(
+                sb, "tlc_images", tlc_path,
+                tlc_photo.getvalue(),
+                content_type=(tlc_photo.type or "image/png")
+            )
+
 
         # insert run row
         row_run = {
