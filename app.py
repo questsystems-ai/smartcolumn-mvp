@@ -319,18 +319,15 @@ def render_mode(mode: str, autocolumn_flag: bool):
         mode=mode,
         silica_override_g=silica_override_g,
         preeq_CV_override=preeq_CV_override,
-        vendor_name=vendor_name,
-        cartridge_name=cartridge_name
+        vendor_name=("Teledyne ISCO CombiFlash Rf+" if autocolumn_flag else None),
+        cartridge_name=(cartridge_name if autocolumn_flag else None),
     )
 
     st.markdown(f"### {mode_label(mode)}")
     highlight_block(plan, autocolumn=autocolumn_flag)
 
-    if autocolumn_flag:
-        # Show vendor-ready CombiFlash method
-        render_combiflash_method(plan)
-    else:
-        # Hand-column: allow ID picker & show details/costs
+    if not autocolumn_flag:
+        # Hand-column: allow ID picker & show details/costs (safe to keep inside the column)
         default_id = round(plan.glass_id_cm * 2) / 2
         sel_id = st.selectbox(
             "Select available column ID (cm) and recalc",
@@ -347,10 +344,10 @@ def render_mode(mode: str, autocolumn_flag: bool):
                 cfg=cfg,
                 mode=mode,
                 override_id_cm=float(sel_id),
-                vendor_name=vendor_name,
-                cartridge_name=cartridge_name
+                vendor_name=None,
+                cartridge_name=None
             )
-            highlight_block(plan, autocolumn=autocolumn_flag)
+            highlight_block(plan, autocolumn=False)
 
         with st.expander("Details & costs", expanded=True):
             details_tables(plan)
@@ -365,10 +362,16 @@ if btn:
         hdr += "  |  System: Hand column"
     st.subheader(hdr)
 
+    # Three side-by-side plan cards
     c1, c2, c3 = st.columns(3, gap="large")
     with c1: plan_cons = render_mode("conservative", autocolumn)
     with c2: plan_std  = render_mode("standard", autocolumn)
     with c3: plan_eff  = render_mode("efficient", autocolumn)
+
+    # Show the vendor entry table ONCE, full width so it won't be clipped
+    if autocolumn:
+        st.markdown("#### CombiFlash Method (standard plan)")
+        render_combiflash_method(plan_std)
 
     # Stash canonical STANDARD plan + raw inputs for post-run
     st.session_state["last_plan_dict"] = asdict(plan_std)
@@ -378,3 +381,4 @@ if btn:
     }
 else:
     st.info("Set inputs, pick **CombiFlash Rf+** cartridge (or Hand column), then click **Plan Column**.")
+
