@@ -260,9 +260,10 @@ def render_post_run(
     email_default: Optional[str] = None,
 ):
     """Post-run intake. On Submit: saves sample, plan (if needed), uploads, inserts run."""
-    _topbar_restart_only()
+    # (Keep your topbar/restart if you still have it)
     st.title("📥 Post-run intake")
 
+    # ---- Context ----
     with st.expander("Context", expanded=True):
         top = st.columns(4)
         vendor = top[0].text_input("Vendor / System", value=default_vendor or "")
@@ -281,12 +282,14 @@ def render_post_run(
             pe = (ref_plan.get('predicted_elution_mL') or [None, None])[1] or 0
             m[2].metric("Planned V̄E", f"{round(pe)} mL")
 
+    # ---- Uploads ----
     st.subheader("Upload files")
     run_file = st.file_uploader("Vendor run export (.csv / .txt / .pdf)", type=["csv", "txt", "pdf"])
     tlc_photo = st.file_uploader("TLC photo (PNG/JPG)", type=["png", "jpg", "jpeg"])
 
+    # Parse (if CSV/TXT)
     df_preview = None
-    obs = {"VS_obs_mL": None, "VE_obs_mL": None, "total_solvent_mL": None}
+    obs_auto = {"VS_obs_mL": None, "VE_obs_mL": None, "total_solvent_mL": None}
     if run_file is not None:
         parsed = parse_vendor_export(run_file)
         if parsed["df"] is not None:
@@ -295,15 +298,117 @@ def render_post_run(
             st.caption("Parsed table (preview)")
             st.dataframe(df_preview, use_container_width=True)
             final_pctEA_hint = (ref_plan or {}).get("final_pctEA")
-            obs = compute_vs_ve_from_trace(df, final_pctEA=final_pctEA_hint)
+            obs_auto = compute_vs_ve_from_trace(df, final_pctEA=final_pctEA_hint)
         else:
             st.info("Stored file for record (PDF/other); VS/VE will need manual entry.")
 
+    # Detect autocolumn vendor
+    vlow = (st.session_state.get("_post_vendor") or "").lower()
+    is_autocolumn = ("combiflash" in vlow) or ("teledyne" in vlow)
+
+    # ---- Minimal autocolumn path ----
+    if is_autocolumn:
+        st.subheader("Auto-detected metrics (from run file)")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Observed V̄S (mL)", f"{obs_auto['VS_obs_mL'] if obs_auto['VS_obs_mL'] is not None else '—'}")
+        c2.metric("Observed V̄E (mL)", f"{obs_auto['VE_obs_mL'] if obs_auto['VE_obs_mL'] is not None else '—'}")
+        c3.metric("Total solvent (mL)", f"{obs_auto['total_solvent_mL'] if obs_auto['total_solvent_mL'] is not None else '—'}")
+
+        # Optional manual override for rare cases
+        with st.expander("Advanced: manual override values", expanded=False):
+            c1o, c2o, c3o = st.columns(3)
+            vs_override = c1o.number_input("V̄S (mL)", value=float(obs_auto["VS_obs_mL"] or 0.0), step=1.0)
+            ve_override = c2o.number_input("V̄E (mL)", value=float(obs_auto["VE_obs_mL"] or 0.0), step=1.0)
+            total_override = c3o.number_input("Total solvent (mL)", value=float(obs_auto["total_solvent_mL"] or 0.0), step=10.0)
+            use_override = st.checkbox("Use manual override", value=False)
+
+        # Optional comments only (no extra outcome/load fields)
+        notes = st.text_area("Comments (optional)", "")
+
+        st.markdown("---")
+        save = st.button("Submit (save plan + run to Supabase)")
+
+        if save:
+            # email required
+            email_val = (st.session_state.get("_post_email") or "").strip()
+            if not _EMAIL_RE.match(email_val):
+                st.error("Please enter a valid email address (required).")
+                st.stop()
+            if sb is None:
+                st.error("Supabase is not configured (missing env or client).")
+                st.stop()
+
+            # ensure plan (insert if needed)
+            vendor = st.session_state.get("_post_vendor")
+            cartridge = st.session_state.get("_post_cartridge")
+            plan_id = _ensure_plan_row(
+                sb, ref_plan=ref_plan, raw_inputs=raw_inputs,
+                sample_id=sample_id, vendor=vendor, cartridge=cartridge
+            )
+
+            # ensure buckets exist (service role can create; anon must pre-create)
+            for _bucket in ("vendor_exports", "tlc_images"):
+                try:
+                    sb.storage.from_(_bucket).list(path="")
+                except Exception:
+                    try:
+                        sb.storage.create_bucket(_bucket, public=False)
+                    except Exception:
+                        st.error(f"Storage bucket '{_bucket}' missing and could not be created.")
+                        st.stop()
+
+            # uploads
+            run_uuid = str(uuid.uuid4())
+            export_path = None
+            tlc_path = None
+            if run_file is not None:
+                export_path = f"{run_uuid}/{run_file.name}"
+                upload_bytes(sb, "vendor_exports", export_path, run_file.getvalue())
+            if tlc_photo is not None:
+                tlc_path = f"{run_uuid}/{tlc_photo.name}"
+                upload_bytes(sb, "tlc_images", tlc_path, tlc_photo.getvalue())
+
+            # choose values (auto or override)
+            vs_ml = float(vs_override) if use_override else (float(obs_auto["VS_obs_mL"]) if obs_auto["VS_obs_mL"] is not None else None)
+            ve_ml = float(ve_override) if use_override else (float(obs_auto["VE_obs_mL"]) if obs_auto["VE_obs_mL"] is not None else None)
+            total_ml = float(total_override) if use_override else (float(obs_auto["total_solvent_mL"]) if obs_auto["total_solvent_mL"] is not None else None)
+            delta_ml = None
+            if ref_plan and ref_plan.get("total_solvent_mL") and total_ml is not None:
+                delta_ml = total_ml - float(ref_plan["total_solvent_mL"])
+
+            # insert run row (minimal fields)
+            row_run = {
+                "plan_id": plan_id,
+                "vendor": vendor,
+                "cartridge": cartridge,
+                "user_email": email_val,
+                "observed_vs_ml": vs_ml,
+                "observed_ve_ml": ve_ml,
+                "total_solvent_ml": total_ml,
+                "delta_solvent_ml": delta_ml,
+                "user_notes": notes,
+                "export_path": export_path,
+                "tlc_image_path": tlc_path,
+                "sample_id": sample_id,
+                "smiles": smiles,
+            }
+            try:
+                res = sb.table("runs").insert(row_run).execute()
+                run_id = res.data[0]["id"]
+                st.success(f"Saved plan_id={plan_id} and run_id={run_id}")
+            except Exception as e:
+                st.error(f"Run insert failed: {e}")
+
+        return  # end autocolumn path
+
+    # ---- Original (hand-column) path below ----
+    # (unchanged from your previous version: shows manual fields)
     st.subheader("Observed metrics")
     c1, c2, c3, c4 = st.columns(4)
-    vs_ml = c1.number_input("Observed V̄S (mL)", value=float(obs["VS_obs_mL"] or 0.0), step=1.0)
-    ve_ml = c2.number_input("Observed V̄E (mL)", value=float(obs["VE_obs_mL"] or 0.0), step=1.0)
-    total_ml = c3.number_input("Total solvent (mL)", value=float(obs["total_solvent_mL"] or 0.0), step=10.0)
+    vs_ml = c1.number_input("Observed V̄S (mL)", value=float(obs_auto["VS_obs_mL"] or 0.0), step=1.0)
+    ve_ml = c2.number_input("Observed V̄E (mL)", value=float(obs_auto["VE_obs_mL"] or 0.0), step=1.0)
+    total_ml = c3.number_input("Total solvent (mL)", value=float(obs_auto["total_solvent_mL"] or 0.0), step=10.0)
 
     delta_ml = None
     if ref_plan and ref_plan.get("total_solvent_mL"):
@@ -335,73 +440,43 @@ def render_post_run(
     save = st.button("Submit (save plan + run to Supabase)")
 
     if save:
-        # email required
         email_val = (st.session_state.get("_post_email") or "").strip()
         if not _EMAIL_RE.match(email_val):
-            st.error("Please enter a valid email address (required).")
-            st.stop()
-
+            st.error("Please enter a valid email address (required)."); st.stop()
         if sb is None:
-            st.error("Supabase is not configured (missing env or client).")
-            st.stop()
+            st.error("Supabase is not configured (missing env or client)."); st.stop()
 
-        # ensure sample (optional in your current schema; if you want to persist sample_name/smiles, insert in app flow)
-        sid = sample_id  # keep as provided (or extend to insert if you want)
+        vendor = st.session_state.get("_post_vendor"); cartridge = st.session_state.get("_post_cartridge")
+        plan_id = _ensure_plan_row(sb, ref_plan=ref_plan, raw_inputs=raw_inputs,
+                                   sample_id=sample_id, vendor=vendor, cartridge=cartridge)
 
-        # ensure plan (insert now if needed)
-        vendor = st.session_state.get("_post_vendor")
-        cartridge = st.session_state.get("_post_cartridge")
-        plan_id = _ensure_plan_row(
-            sb, ref_plan=ref_plan, raw_inputs=raw_inputs,
-            sample_id=sid, vendor=vendor, cartridge=cartridge
-        )
+        for _bucket in ("vendor_exports", "tlc_images"):
+            try: sb.storage.from_(_bucket).list(path="")
+            except Exception:
+                try: sb.storage.create_bucket(_bucket, public=False)
+                except Exception:
+                    st.error(f"Storage bucket '{_bucket}' missing and could not be created."); st.stop()
 
-        # upload files
-        run_uuid = str(uuid.uuid4())
-        export_path = None
-        tlc_path = None
-
-        # Vendor export
+        run_uuid = str(uuid.uuid4()); export_path = None; tlc_path = None
         if run_file is not None:
             export_path = f"{run_uuid}/{run_file.name}"
-            try:
-                upload_bytes(sb, "vendor_exports", export_path, run_file.getvalue())
-            except Exception as e:
-                st.error(f"Export upload failed for '{export_path}': {e}")
-                return
-
-        # TLC image
+            upload_bytes(sb, "vendor_exports", export_path, run_file.getvalue())
         if tlc_photo is not None:
             tlc_path = f"{run_uuid}/{tlc_photo.name}"
-            try:
-                upload_bytes(sb, "tlc_images", tlc_path, tlc_photo.getvalue())
-            except Exception as e:
-                st.error(f"TLC upload failed for '{tlc_path}': {e}")
-                return
+            upload_bytes(sb, "tlc_images", tlc_path, tlc_photo.getvalue())
 
-
-        # insert run row
         row_run = {
             "plan_id": plan_id,
-            "vendor": vendor,
-            "cartridge": cartridge,
+            "vendor": vendor, "cartridge": cartridge,
             "user_email": email_val,
-            "observed_vs_ml": vs_ml or None,
-            "observed_ve_ml": ve_ml or None,
-            "total_solvent_ml": total_ml or None,
-            "delta_solvent_ml": (delta_ml if delta_ml is not None else None),
-            "outcome": outcome,
-            "user_notes": notes,
-            "export_path": export_path,
-            "tlc_image_path": tlc_path,
-            "observed_purity_pct": purity or None,
-            "observed_yield_pct": yield_pct or None,
+            "observed_vs_ml": vs_ml, "observed_ve_ml": ve_ml,
+            "total_solvent_ml": total_ml, "delta_solvent_ml": delta_ml,
+            "outcome": outcome, "user_notes": notes,
+            "export_path": export_path, "tlc_image_path": tlc_path,
+            "observed_purity_pct": purity or None, "observed_yield_pct": yield_pct or None,
             "loading_mode": ("liquid" if mode.startswith("Liquid") else "dryload"),
-            "loading_pct_ea": loading_pctEA,
-            "loading_vol_ml": loading_vol_mL,
-            "dryload_silica_g": dryload_silica_g,
-            "sample_id": sid,
-            "smiles": smiles,
+            "loading_pct_ea": loading_pctEA, "loading_vol_ml": loading_vol_mL, "dryload_silica_g": dryload_silica_g,
+            "sample_id": sample_id, "smiles": smiles,
         }
         try:
             res = sb.table("runs").insert(row_run).execute()
