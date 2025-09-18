@@ -75,29 +75,36 @@ def show_mathjax_html(path: str, height: int = 900):
 
 def highlight_block(plan, autocolumn: bool):
     """Top summary strip. In autocolumn mode, do NOT show 'increment'."""
+    # Define shared pieces first so they're always in scope
+    final_iso = f"{round(plan.final_pctEA)}% EA"
+
     if autocolumn:
+        # Rounded display for readability
+        preeq_disp = int(round(plan.pre_equilibrate_mL / 10.0) * 10)
+        flow_disp = int(round(plan.flow_mL_min))
+
         top_line = (
             f"<b>Vendor:</b> {plan.vendor_name or 'CombiFlash Rf+'} &nbsp;|&nbsp; "
             f"<b>Cartridge:</b> {plan.cartridge_name or '—'}"
         )
+        mid = (
+            f"<b>Final isocratic:</b> {final_iso} &nbsp;|&nbsp; "
+            f"<b>Equilibrate:</b> {preeq_disp} mL &nbsp;|&nbsp; "
+            f"<b>Flow:</b> {flow_disp} mL/min"
+        )
     else:
         size = f"{round(plan.glass_id_cm, 1)} cm ID × {round(plan.bed_height_cm)} cm bed"
         top_line = f"<b>Column:</b> {size}"
-
-    final_iso = f"{round(plan.final_pctEA)}% EA"
-    preeq    = f"{round(plan.pre_equilibrate_mL)} mL"
-    flow     = f"{round(plan.flow_mL_min, 1)} mL/min"
-
-    if autocolumn:
-        # No increment shown for autocolumn
-        mid = f"<b>Final isocratic:</b> {final_iso} &nbsp;|&nbsp; <b>Equilibration:</b> {preeq} &nbsp;|&nbsp; <b>Flow:</b> {flow}"
-    else:
         inc_vol = f"{round(plan.increment_volume_mL)} mL"
-        mid = (f"<b>Final isocratic:</b> {final_iso} &nbsp;|&nbsp; "
-               f"<b>%EA increment:</b> 5% &nbsp;|&nbsp; "
-               f"<b>Increment volume:</b> {inc_vol} &nbsp;|&nbsp; "
-               f"<b>Pre-equilibration:</b> {preeq} &nbsp;|&nbsp; "
-               f"<b>Flow:</b> {flow}")
+        preeq = f"{round(plan.pre_equilibrate_mL)} mL"
+        flow = f"{round(plan.flow_mL_min, 1)} mL/min"
+        mid = (
+            f"<b>Final isocratic:</b> {final_iso} &nbsp;|&nbsp; "
+            f"<b>%EA increment:</b> 5% &nbsp;|&nbsp; "
+            f"<b>Increment volume:</b> {inc_vol} &nbsp;|&nbsp; "
+            f"<b>Pre-equilibration:</b> {preeq} &nbsp;|&nbsp; "
+            f"<b>Flow:</b> {flow}"
+        )
 
     st.markdown(
         f"""
@@ -148,49 +155,54 @@ def render_combiflash_method(plan):
     """Show a vendor-ready CombiFlash method: continuous gradient points (no step increments)."""
     cv_mL = float(plan.column_volume_mL)
     flow = float(plan.flow_mL_min)
+
+    # Display rounding: flow → nearest 1; equilibration → nearest 10
+    flow_disp = int(round(flow))
+    preeq_disp = int(round(plan.pre_equilibrate_mL / 10.0) * 10)
+
     time_per_cv_min = cv_mL / max(1e-6, flow)
 
-    # Choose a simple 2-point ramp: 0 %B at 0 CV -> final %B at ~3.5 CV
-    # Then hold at final %B for the planned plateau duration (converted to CV)
+    # Continuous ramp: 0 %B at 0 CV → final %B at ~3.5 CV, then a short hold (from plan)
     ramp_end_CV = 3.5
     hold_CV = plan.final_plateau_mL / max(1e-6, cv_mL)
 
-    # Optional flush as 90 %B for 0.5 CV
     include_flush = st.checkbox("Include 90% B flush", value=True, key=f"flush_{plan.mode}")
     flush_CV = 0.5 if include_flush else 0.0
 
+    # Settings table (concise & legible)
+    st.subheader("CombiFlash Method (enter these)")
+    settings_df = pd.DataFrame(
+        [
+            ["Solvent A", SOLVENT_A_NAME],
+            ["Solvent B", SOLVENT_B_NAME],
+            ["Flow (mL/min)", f"{flow_disp}"],
+            ["Equilibrate (mL)", f"{preeq_disp}"],
+        ],
+        columns=["Field", "Value"],
+    )
+    st.table(settings_df)
+
+    # Gradient points (instrument linearly interpolates between points)
     points = []
     # P1: start
-    points.append(
-        {"Point": "P1", "%B (EA)": 0.0, "CV target": 0.0, "Time (min)": 0.0}
-    )
+    points.append({"Point": "P1", "%B (EA)": 0.0, "CV target": 0.00, "Time (min)": 0.0})
     # P2: end of ramp
     t2 = ramp_end_CV * time_per_cv_min
-    points.append(
-        {"Point": "P2", "%B (EA)": round(plan.final_pctEA, 1), "CV target": round(ramp_end_CV, 2), "Time (min)": round(t2, 1)}
-    )
+    points.append({"Point": "P2", "%B (EA)": round(plan.final_pctEA, 1),
+                   "CV target": round(ramp_end_CV, 2), "Time (min)": round(t2, 1)})
     # P3: end of hold
     cv3 = ramp_end_CV + hold_CV
     t3 = cv3 * time_per_cv_min
-    points.append(
-        {"Point": "P3", "%B (EA)": round(plan.final_pctEA, 1), "CV target": round(cv3, 2), "Time (min)": round(t3, 1)}
-    )
+    points.append({"Point": "P3", "%B (EA)": round(plan.final_pctEA, 1),
+                   "CV target": round(cv3, 2), "Time (min)": round(t3, 1)})
     # P4: optional flush
     if include_flush and flush_CV > 0:
         cv4 = cv3 + flush_CV
         t4 = cv4 * time_per_cv_min
-        points.append(
-            {"Point": "P4", "%B (EA)": 90.0, "CV target": round(cv4, 2), "Time (min)": round(t4, 1)}
-        )
+        points.append({"Point": "P4", "%B (EA)": 90.0,
+                       "CV target": round(cv4, 2), "Time (min)": round(t4, 1)})
 
-    st.subheader("CombiFlash Method (enter these)")
-    cols = st.columns(4)
-    cols[0].metric("Solvent A", SOLVENT_A_NAME)
-    cols[1].metric("Solvent B", SOLVENT_B_NAME)
-    cols[2].metric("Flow", f"{round(flow,1)} mL/min")
-    cols[3].metric("Equilibrate", f"{round(plan.pre_equilibrate_mL)} mL")
-
-    st.caption("Gradient points (instrument linearly interpolates between points)")
+    st.caption("Gradient points (the instrument interpolates between points)")
     st.table(pd.DataFrame(points, columns=["Point", "%B (EA)", "CV target", "Time (min)"]))
 
 # ===================== ROUTE: post_run =====================
